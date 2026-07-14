@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        compiler: [g++, clang++]
+        exclude:
+          - os: macos-latest
+            compiler: g++
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja || true
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DME_ENABLE_LTO=OFF
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit tests
+        run: ./build/me_tests
+
+      - name: Benchmark (informational)
+        run: ./build/me_bench
