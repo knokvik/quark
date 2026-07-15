@@ -79,3 +79,7 @@ matching-engine/
 ## License
 
 MIT
+
+## Build tips
+
+Use Ninja + Release for representative numbers.
