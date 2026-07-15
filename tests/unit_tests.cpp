@@ -234,6 +234,22 @@ static void test_vs_naive_random() {
     }
 }
 
+
+static void test_multi_level_sweep() {
+    OrderBook book(small_cfg());
+    book.insert(1, Side::Ask, OrderType::Limit, 100'0000, 10);
+    book.insert(2, Side::Ask, OrderType::Limit, 100'1000, 10);
+    book.insert(3, Side::Ask, OrderType::Limit, 100'2000, 10);
+    auto r = book.insert(9, Side::Bid, OrderType::Limit, 100'2000, 25);
+    EXPECT(r.ok);
+    EXPECT(book.find(1) == nullptr);
+    EXPECT(book.find(2) == nullptr);
+    Order* a3 = book.find(3);
+    EXPECT(a3 != nullptr);
+    EXPECT(a3->remaining() == 5);
+    EXPECT(book.best_ask() == 100'2000);
+}
+
 static void test_events() {
     OrderBook book(small_cfg());
     book.insert(1, Side::Ask, OrderType::Limit, 100'0000, 10);
@@ -261,6 +277,7 @@ int main() {
     test_robin_hood();
     test_spsc();
     test_events();
+    test_multi_level_sweep();
     test_vs_naive_random();
 
     std::printf("Passed: %d  Failed: %d\n", g_passed, g_failed);
