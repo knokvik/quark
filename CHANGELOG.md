@@ -5,3 +5,7 @@
 - Robin Hood ID index, arena pools, SPSC events
 - Unit tests vs naive reference
 - Release benchmark harness
+
+## Status
+
+MVP complete: tests green, targets met on Apple Silicon.
