@@ -12,3 +12,5 @@ int main() {
                 (unsigned long long)book.best_ask());
     return 0;
 }
+
+// Build with: cmake --build build --target me_tests
