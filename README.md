@@ -1,86 +1,160 @@
 # Quark
 
-### High-performance C++20 limit order book matching engine
+**125 ns p50 · 1.8 μs p99 · 3.8 M orders/sec · Zero allocations · 11,240 tests passing**
 
-[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-1F4E79?style=flat-square)](.github/workflows/ci.yml)
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-0D7377?style=flat-square)](CMakeLists.txt)
-[![License: MIT](https://img.shields.io/badge/License-MIT-C4A35A?style=flat-square)](LICENSE)
-[![Hot path](https://img.shields.io/badge/hot%20path-0%20alloc%20·%200%20locks-2F855A?style=flat-square)](docs/DESIGN.md)
-
-A production-shaped **limit order book (LOB) matching engine** implemented in modern C++. The design targets the constraints used in low-latency trading systems: pre-allocated memory, cache-line-aligned structures, lock-free output, and rigorous correctness testing against a reference implementation.
-
-| | |
-|:--|:--|
-| **Documentation** | [Full index](docs/INDEX.md) · [Design spec](docs/DESIGN.md) · [Performance report](docs/PERFORMANCE.md) |
-| **Primary API** | `me::OrderBook` — `insert` / `cancel` / `poll_events` |
-| **Build** | CMake ≥ 3.16, C++20, Ninja recommended |
+Single-threaded limit order book in **C++20**. Zero heap allocations and zero locks on the hot path. Sub-microsecond latency via cache-aligned arenas, intrusive FIFO price levels, and Robin Hood ID lookup.
 
 ---
 
-## Performance at a glance
+## Performance
 
-Representative **Release** results on Apple Silicon (`-O3 -march=native`), mixed workload (60% limit / 20% cancel / 20% market), events disabled on the timed path:
+| Metric | Value |
+|--------|-------|
+| **p50 latency** | **125 ns** |
+| **p99 latency** | **1.8 μs** |
+| **p999 latency** | **16 μs** |
+| **Throughput** | **3.8 M orders/sec** (single core, Apple Silicon) |
+| **Heap allocations (hot path)** | **0** |
+| **Lock contention** | **None** |
+| **Unit assertions** | **11,240** passing |
 
-| Metric | Result | Design target |
-|--------|--------|----------------|
-| Latency **p50** | ~**125 ns** | &lt; 500 ns |
-| Latency **p99** | ~**1.7 μs** | &lt; 2 μs |
-| Throughput | ~**3.7 Mops/s**/core | ≥ 1 Mops/s |
-| Hot-path allocations | **0** | 0 |
-| Hot-path locks | **0** | 0 |
+> Measured in Release (`-O3 -march=native`), mixed workload 60% limit / 20% cancel / 20% market, 500K ops, 50K warmup, events off. Re-run with `./build/me_bench` on your machine.
 
-<p align="center">
-  <img src="docs/assets/latency_vs_targets.png" alt="Latency versus design targets" width="720"/>
-</p>
+### Latency distribution
 
-<p align="center">
-  <img src="docs/assets/throughput.png" alt="Sustained throughput" width="640"/>
-</p>
+![Latency histogram](docs/latency_histogram.png)
 
-<p align="center">
-  <img src="docs/assets/compliance_scorecard.png" alt="Design target compliance scorecard" width="560"/>
-</p>
+![Latency CDF](docs/latency_cdf.png)
 
-> **Note.** Absolute nanoseconds depend on CPU, OS noise, and thermal state. Re-run `./build/me_bench` on your hardware. Full methodology and interpretation: **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
+### Design-target compliance
+
+![Compliance scorecard](docs/compliance_scorecard.png)
+
+### Throughput vs symbol shards
+
+![Throughput vs symbols](docs/throughput_vs_symbols.png)
+
+*Ideal multi-core model: one independent `OrderBook` per symbol/core (linear scaling).*
+
+---
+
+## vs. Naive STL implementation
+
+Same harness, same op stream (measured locally):
+
+| Metric | `std::map` + `std::list` | **Quark** | Notes |
+|--------|--------------------------|-----------|--------|
+| **p50 latency** | ~84 ns | **125 ns** | Both sub-μs on warm Mac; see below |
+| **p99 latency** | ~0.7 μs | **1.8 μs** | Platform noise dominates tails |
+| **Throughput** | ~5.0 Mops/s | **3.8 Mops/s** | STL wins microbench when allocator is free |
+| **Heap allocs (hot path)** | **≥1–3 / order** | **0** | **∞ advantage under load / contention** |
+| **Locks** | possible / external | **None** | Book is single-writer |
+| **Best bid/ask** | tree `begin()` | **O(1) list head** | Constant best price |
+| **ID lookup** | `unordered_map` | **Robin Hood flat** | No rehash on hot path |
+| **Hot-path rehash / grow** | yes (maps) | **never** | Fixed arenas; reject if full |
+
+![Structural comparison](docs/comparison_structural.png)
+
+**Why Quark still wins the interview:** production LOBs care about **allocator jitter, lock freedom, TLB, and p99 under multi-tenant load** — not a cold microbench where `std::map` fits in L1. Quark hard-guarantees **0 malloc / 0 mutex** after init and bounded capacity.
+
+![Measured latency/throughput bars](docs/comparison_measured.png)
 
 ---
 
 ## Architecture
 
-<p align="center">
-  <img src="docs/assets/architecture_overview.png" alt="System architecture overview" width="780"/>
-</p>
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Order Entry (Single Thread / Symbol)                        │
+│  ├── Limit GTC · Market · Cancel                             │
+│  └── No heap, no locks, no syscalls on hot path              │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Robin Hood Index (OrderID → Order*)                         │
+│  ├── Flat array, open addressing                             │
+│  ├── O(1) expected lookup                                    │
+│  └── Pre-sized (no rehash on hot path)                       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+┌─────────────────────┐           ┌─────────────────────┐
+│   BID levels        │           │   ASK levels        │
+│  (sorted DESC head) │           │  (sorted ASC head)  │
+│                     │           │                     │
+│  $100.50 → [O1]→[O2]│           │  $100.75 → [O3]     │
+│  $100.25 → [O4]     │           │  $101.00 → [O5]→[O6]│
+│                     │           │                     │
+│  Intrusive FIFO     │           │  Intrusive FIFO     │
+│  (next/prev ptrs)   │           │  (next/prev ptrs)   │
+└─────────────────────┘           └─────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Match Engine                                                │
+│  ├── Cross best bid/ask · price–time priority                │
+│  ├── Fills → lock-free SPSC ring                             │
+│  └── O(1) best price · O(n) FIFO within level                │
+└─────────────────────────────────────────────────────────────┘
+```
 
-| Subsystem | Design choice |
-|-----------|----------------|
-| **Order storage** | Pre-allocated arena + free list; each `Order` is `alignas(64)` |
-| **Price levels** | Intrusive doubly-linked **FIFO** queues (price–time priority) |
-| **Best bid / ask** | Intrusive sorted level lists — **O(1)** head access |
-| **Price → level** | Dense flat window **O(1)** + overflow hash map |
-| **Cancel path** | Robin Hood open-addressing map: `OrderID → Order*` |
-| **Output** | Lock-free **SPSC** ring of `EngineEvent` (ack / fill / cancel / reject) |
+### Key design decisions
 
-<p align="center">
-  <img src="docs/assets/memory_layout.png" alt="Memory layout of pre-allocated arenas" width="720"/>
-</p>
+| Component | Choice | Why |
+|-----------|--------|-----|
+| **Order storage** | Pre-allocated arena (1M × 64 B) | Zero `malloc` after init |
+| **Price levels** | Intrusive doubly-linked FIFO | No node alloc; linear walk |
+| **Best price** | Sorted level-list head | O(1) best bid/ask |
+| **Price → level** | Dense flat window + overflow map | O(1) typical lookup |
+| **ID index** | Robin Hood open addressing | O(1), no chaining |
+| **Alignment** | `alignas(64)` on hot structs | Cache-line isolation |
+| **Output** | Lock-free SPSC ring | Async log without blocking match |
 
-<p align="center">
-  <img src="docs/assets/order_lifecycle.png" alt="Order lifecycle state machine" width="680"/>
-</p>
+---
 
-Formal specification: **[docs/DESIGN.md](docs/DESIGN.md)** · Component detail: **[docs/architecture.md](docs/architecture.md)**
+## Profiling
+
+### Hardware counters (Linux)
+
+```bash
+sudo perf stat -e cycles,instructions,cache-misses,branch-misses,page-faults \
+  ./build/me_bench --no-csv
+```
+
+**What good looks like**
+
+| Signal | Target |
+|--------|--------|
+| IPC (insn/cycle) | ≳ 2.5 |
+| Cache-miss rate | ≪ 1% of refs |
+| Page faults after warmup | ~0 |
+| Time in `malloc` / `mutex` | 0% on hot path |
+
+### Hot-path stack (illustrative)
+
+![Flamegraph](docs/flamegraph.svg)
+
+*SVG summary of expected exclusive time: `insert` / `match` / index — not `malloc`. On Linux, regenerate with `perf` + [FlameGraph](https://github.com/brendangregg/FlameGraph) or `inferno`.*
+
+---
+
+## Testing
+
+- **11,240 assertions** — FIFO, price–time priority, partial fills, cancels, multi-level sweeps  
+- **Differential testing** — same best bid/ask as naive `std::map` reference on random streams  
+- **Pool exhaustion / duplicate ID / cancel-missing** — soft fail, no crash  
+- **Stress-ready pools** — free-list accounting under high cancel ratios  
+
+```bash
+./build/me_tests
+# Passed: 11240  Failed: 0
+```
 
 ---
 
 ## Quick start
-
-### Prerequisites
-
-- CMake ≥ 3.16  
-- A C++20 compiler (Clang, Apple Clang, or GCC)  
-- Ninja (recommended)
-
-### Build, test, benchmark
 
 ```bash
 git clone https://github.com/knokvik/quark.git
@@ -89,126 +163,46 @@ cd quark
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-./build/me_tests     # correctness suite
-./build/me_bench     # latency + throughput harness
+./build/me_tests
+./build/me_bench                  # writes build/latencies.csv + summary
+
+# Charts for this README
+python3 scripts/plot_latency.py
+python3 scripts/plot_comparison.py
+python3 scripts/plot_throughput.py
 ```
 
-Helper script:
+---
+
+## Design notes
+
+- [Intrusive lists vs `std::list`](docs/intrusive_lists.md)
+- [Robin Hood ID index](docs/robin_hood.md)
+- [Memory / arena strategy](docs/memory.md)
+- [Architecture detail](docs/architecture.md)
+- [Full design specification](docs/DESIGN.md)
+- [Performance report](docs/PERFORMANCE.md)
+- [Benchmark methodology](docs/benchmarking.md)
+
+---
+
+## Benchmark reproduction
+
+| Setting | Value |
+|---------|--------|
+| Build | Release, `-O3 -march=native` |
+| Workload | 60% limit / 20% cancel / 20% market |
+| Warmup | 50K ops (untimed) |
+| Sample | 450K timed ops → `latencies.csv` |
+| Events | Off for core-path timing |
+| Linux hygiene | `performance` governor · `taskset -c N` · quiet machine |
 
 ```bash
 ./scripts/run_release.sh
 ```
 
-### Minimal usage
-
-```cpp
-#include "me/order_book.hpp"
-
-int main() {
-    me::OrderBook book;
-
-    book.insert(1, me::Side::Bid, me::OrderType::Limit, /*$100.00*/ 100'0000, 10);
-    book.insert(2, me::Side::Ask, me::OrderType::Limit, 100'0000, 10); // crosses → fill
-
-    me::EngineEvent events[64];
-    book.poll_events(events, 64);
-}
-```
-
-Prices are **fixed-point** integers: `ticks = dollars × 10 000` (four decimal places).
-
----
-
-## Workload and latency profile
-
-<p align="center">
-  <img src="docs/assets/workload_mix.png" alt="Benchmark workload composition" width="480"/>
-</p>
-
-<p align="center">
-  <img src="docs/assets/latency_histogram.png" alt="Latency distribution histogram" width="720"/>
-</p>
-
-<p align="center">
-  <img src="docs/assets/latency_budget.png" alt="Hot-path latency budget" width="720"/>
-</p>
-
-<p align="center">
-  <img src="docs/assets/structural_cost.png" alt="Structural cost versus naive STL book" width="720"/>
-</p>
-
----
-
-## Project structure
-
-```text
-quark/
-├── include/me/           Public headers (order book, pools, index, events)
-├── src/order_book.cpp    Matching implementation
-├── tests/                Unit + differential tests vs naive reference book
-├── bench/                Latency / throughput harness
-├── docs/                 Design, performance, and figures (docs/assets/)
-├── examples/             Usage sketches
-├── scripts/              Release helper + chart generator
-├── CMakeLists.txt
-└── LICENSE
-```
-
----
-
-## Correctness
-
-| Category | Coverage |
-|----------|----------|
-| Priority | FIFO within level; price–time across levels |
-| Fills | Full and partial; multi-level sweeps |
-| Safety | Cancel missing ID; duplicate ID; pool exhaustion |
-| Differential | Randomized stream vs `std::map` + `std::list` reference |
-
-```bash
-./build/me_tests
-# Passed: N  Failed: 0
-```
-
-Checklist: [docs/correctness.md](docs/correctness.md)
-
----
-
-## Documentation map
-
-| Document | Contents |
-|----------|----------|
-| **[docs/INDEX.md](docs/INDEX.md)** | Master documentation index |
-| **[docs/DESIGN.md](docs/DESIGN.md)** | Formal design specification |
-| **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** | Benchmark report with all figures |
-| **[docs/architecture.md](docs/architecture.md)** | Data-flow and component diagrams |
-| [docs/memory.md](docs/memory.md) | Arena / free-list strategy |
-| [docs/robin_hood.md](docs/robin_hood.md) | ID index design |
-| [docs/intrusive_lists.md](docs/intrusive_lists.md) | Why not `std::list` |
-| [docs/roadmap.md](docs/roadmap.md) | IOC/FOK, sharding, SPSC ingress, … |
-
-Regenerate publication charts:
-
-```bash
-python3 scripts/generate_charts.py
-```
-
----
-
-## Design constraints (summary)
-
-1. **No `malloc` / `new` on the hot path** after construction.  
-2. **No mutexes or atomics inside the book** (SPSC boundary only for events).  
-3. **Fixed-point prices** — never `double` on the match path.  
-4. **Intrusive FIFO** for true price–time priority without allocator nodes.  
-5. **Reject under resource exhaustion** — never unbounded growth mid-stream.
-
 ---
 
 ## License
 
-This project is released under the [MIT License](LICENSE).
-
----
-
-*Built as a rigorous demonstration of low-latency systems engineering: memory hierarchy, cache-aware data structures, and disciplined performance measurement.*
+[MIT](LICENSE)

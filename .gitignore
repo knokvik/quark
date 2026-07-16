@@ -10,3 +10,6 @@ compile_commands.json
 .vscode/
 *.user
 CMakeUserPresets.json
+latencies.csv
+bench_summary.txt
+throughput_vs_symbols.csv
