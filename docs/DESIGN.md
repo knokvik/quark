@@ -1,5 +1,5 @@
 # Design Specification  
-## Limit Order Book Matching Engine (C++20)
+## Quark — Limit Order Book Matching Engine (C++20)
 
 | Field | Value |
 |-------|--------|

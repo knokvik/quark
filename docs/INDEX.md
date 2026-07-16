@@ -1,6 +1,6 @@
 # Documentation Index
 
-Formal technical documentation for the **Mercury-style Limit Order Book Matching Engine**.
+Formal technical documentation for **Quark** — a high-performance limit order book matching engine.
 
 | Document | Description |
 |----------|-------------|

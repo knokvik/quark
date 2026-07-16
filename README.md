@@ -1,6 +1,6 @@
-# Limit Order Book Matching Engine
+# Quark
 
-### High-performance C++20 core for sub-microsecond order matching
+### High-performance C++20 limit order book matching engine
 
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-1F4E79?style=flat-square)](.github/workflows/ci.yml)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-0D7377?style=flat-square)](CMakeLists.txt)
@@ -83,8 +83,8 @@ Formal specification: **[docs/DESIGN.md](docs/DESIGN.md)** · Component detail: 
 ### Build, test, benchmark
 
 ```bash
-git clone <repository-url> matching-engine
-cd matching-engine
+git clone https://github.com/knokvik/quark.git
+cd quark
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
@@ -142,7 +142,7 @@ Prices are **fixed-point** integers: `ticks = dollars × 10 000` (four decimal
 ## Project structure
 
 ```text
-matching-engine/
+quark/
 ├── include/me/           Public headers (order book, pools, index, events)
 ├── src/order_book.cpp    Matching implementation
 ├── tests/                Unit + differential tests vs naive reference book
