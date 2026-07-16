@@ -174,4 +174,134 @@ private:
     std::vector<NaiveFill> fills_;
 };
 
+// Textbook baseline: map of price → vector, cancel scans the level (O(n)).
+// Typical first-pass interview solution — allocates and scans on cancel.
+class TextbookBook {
+public:
+    bool insert(uint64_t id, Side side, OrderType type, uint64_t price, uint32_t quantity) {
+        if (quantity == 0 || index_.count(id)) return false;
+        if (type == OrderType::Limit && !valid_price(price)) return false;
+
+        NaiveOrder o;
+        o.id = id;
+        o.price = (type == OrderType::Market) ? 0 : price;
+        o.quantity = quantity;
+        o.filled_qty = 0;
+        o.side = side;
+        o.type = type;
+
+        match(o);
+        if (!o.fully_filled() && type == OrderType::Limit) {
+            if (side == Side::Bid) {
+                bids_[o.price].push_back(o);
+            } else {
+                asks_[o.price].push_back(o);
+            }
+            index_[o.id] = {side, o.price};
+        }
+        return true;
+    }
+
+    bool cancel(uint64_t id) {
+        auto it = index_.find(id);
+        if (it == index_.end()) return false;
+        const Side side = it->second.first;
+        const uint64_t price = it->second.second;
+        if (side == Side::Bid) {
+            auto pit = bids_.find(price);
+            if (pit == bids_.end()) {
+                index_.erase(it);
+                return false;
+            }
+            auto& vec = pit->second;
+            for (auto vit = vec.begin(); vit != vec.end(); ++vit) {
+                if (vit->id == id) {
+                    vec.erase(vit); // O(n) element shift
+                    if (vec.empty()) bids_.erase(pit);
+                    index_.erase(it);
+                    return true;
+                }
+            }
+        } else {
+            auto pit = asks_.find(price);
+            if (pit == asks_.end()) {
+                index_.erase(it);
+                return false;
+            }
+            auto& vec = pit->second;
+            for (auto vit = vec.begin(); vit != vec.end(); ++vit) {
+                if (vit->id == id) {
+                    vec.erase(vit);
+                    if (vec.empty()) asks_.erase(pit);
+                    index_.erase(it);
+                    return true;
+                }
+            }
+        }
+        index_.erase(it);
+        return false;
+    }
+
+    [[nodiscard]] uint64_t best_bid() const {
+        return bids_.empty() ? 0 : bids_.begin()->first;
+    }
+    [[nodiscard]] uint64_t best_ask() const {
+        return asks_.empty() ? 0 : asks_.begin()->first;
+    }
+
+private:
+    struct BidCmp {
+        bool operator()(uint64_t a, uint64_t b) const { return a > b; }
+    };
+    struct AskCmp {
+        bool operator()(uint64_t a, uint64_t b) const { return a < b; }
+    };
+
+    void match(NaiveOrder& incoming) {
+        if (incoming.side == Side::Bid) {
+            while (incoming.remaining() > 0 && !asks_.empty()) {
+                auto pit = asks_.begin();
+                if (incoming.type == OrderType::Limit && incoming.price < pit->first) break;
+                auto& vec = pit->second;
+                if (vec.empty()) {
+                    asks_.erase(pit);
+                    continue;
+                }
+                auto& passive = vec.front();
+                const uint32_t qty = std::min(incoming.remaining(), passive.remaining());
+                incoming.filled_qty += qty;
+                passive.filled_qty += qty;
+                if (passive.fully_filled()) {
+                    index_.erase(passive.id);
+                    vec.erase(vec.begin());
+                    if (vec.empty()) asks_.erase(pit);
+                }
+            }
+        } else {
+            while (incoming.remaining() > 0 && !bids_.empty()) {
+                auto pit = bids_.begin();
+                if (incoming.type == OrderType::Limit && incoming.price > pit->first) break;
+                auto& vec = pit->second;
+                if (vec.empty()) {
+                    bids_.erase(pit);
+                    continue;
+                }
+                auto& passive = vec.front();
+                const uint32_t qty = std::min(incoming.remaining(), passive.remaining());
+                incoming.filled_qty += qty;
+                passive.filled_qty += qty;
+                if (passive.fully_filled()) {
+                    index_.erase(passive.id);
+                    vec.erase(vec.begin());
+                    if (vec.empty()) bids_.erase(pit);
+                }
+            }
+        }
+    }
+
+    std::map<uint64_t, std::vector<NaiveOrder>, BidCmp> bids_;
+    std::map<uint64_t, std::vector<NaiveOrder>, AskCmp> asks_;
+    std::unordered_map<uint64_t, std::pair<Side, uint64_t>> index_;
+};
+
 } // namespace me

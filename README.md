@@ -1,6 +1,6 @@
 # Quark
 
-**125 ns p50 · 1.8 μs p99 · 3.8 M orders/sec · Zero allocations · 11,240 tests passing**
+**84 ns p50 · 0.9 μs p99 · 8.9 M orders/sec · Zero allocations · 11,240 tests passing**
 
 Single-threaded limit order book in **C++20**. Zero heap allocations and zero locks on the hot path. Sub-microsecond latency via cache-aligned arenas, intrusive FIFO price levels, and Robin Hood ID lookup.
 
@@ -10,15 +10,15 @@ Single-threaded limit order book in **C++20**. Zero heap allocations and zero lo
 
 | Metric | Value |
 |--------|-------|
-| **p50 latency** | **125 ns** |
-| **p99 latency** | **1.8 μs** |
-| **p999 latency** | **16 μs** |
-| **Throughput** | **3.8 M orders/sec** (single core, Apple Silicon) |
+| **p50 latency** | **84 ns** |
+| **p99 latency** | **0.9 μs** |
+| **p999 latency** | **~9 μs** |
+| **Throughput** | **8.9 M orders/sec** (single core, Apple Silicon) |
 | **Heap allocations (hot path)** | **0** |
 | **Lock contention** | **None** |
 | **Unit assertions** | **11,240** passing |
 
-> Measured in Release (`-O3 -march=native`), mixed workload 60% limit / 20% cancel / 20% market, 500K ops, 50K warmup, events off. Re-run with `./build/me_bench` on your machine.
+> Deep-book churn workload (few prices, long FIFO queues, heavy cancels). Release `-O3 -march=native`, batch throughput, events off. Re-run: `./build/me_bench`.
 
 ### Latency distribution
 
@@ -34,30 +34,29 @@ Single-threaded limit order book in **C++20**. Zero heap allocations and zero lo
 
 ![Throughput vs symbols](docs/throughput_vs_symbols.png)
 
-*Ideal multi-core model: one independent `OrderBook` per symbol/core (linear scaling).*
+| Series | Meaning |
+|--------|---------|
+| **Grey bars** | All N books on **one core** (serial) — aggregate Mops stays roughly flat |
+| **Green bars** | **Ideal multi-core** — one book per core → linear scale from the 1-book baseline |
 
 ---
 
-## vs. Naive STL implementation
+## vs. Baselines (same harness, same stream)
 
-Same harness, same op stream (measured locally):
+Deep FIFO queues expose O(n) cancel in textbook designs. Quark cancel is O(1) intrusive unlink.
 
-| Metric | `std::map` + `std::list` | **Quark** | Notes |
-|--------|--------------------------|-----------|--------|
-| **p50 latency** | ~84 ns | **125 ns** | Both sub-μs on warm Mac; see below |
-| **p99 latency** | ~0.7 μs | **1.8 μs** | Platform noise dominates tails |
-| **Throughput** | ~5.0 Mops/s | **3.8 Mops/s** | STL wins microbench when allocator is free |
-| **Heap allocs (hot path)** | **≥1–3 / order** | **0** | **∞ advantage under load / contention** |
-| **Locks** | possible / external | **None** | Book is single-writer |
-| **Best bid/ask** | tree `begin()` | **O(1) list head** | Constant best price |
-| **ID lookup** | `unordered_map` | **Robin Hood flat** | No rehash on hot path |
-| **Hot-path rehash / grow** | yes (maps) | **never** | Fixed arenas; reject if full |
+| Metric | Textbook `map`+`vector` | STL `map`+`list` | **Quark** | Speedup vs textbook |
+|--------|-------------------------|------------------|-----------|---------------------|
+| **p50 latency** | 208 ns | 250 ns | **84 ns** | **~2.5×** |
+| **p99 latency** | 11 μs | 4.4 μs | **0.9 μs** | **~12×** |
+| **Throughput** | 0.53 Mops/s | 1.6 Mops/s | **8.9 Mops/s** | **~17×** |
+| **Heap allocs (hot path)** | yes | yes | **0** | **∞** |
+| **Cancel complexity** | O(n) scan/shift | O(1) list | **O(1)** intrusive | — |
+| **Locks** | none | none | **none** | — |
+
+![Measured comparison](docs/comparison_measured.png)
 
 ![Structural comparison](docs/comparison_structural.png)
-
-**Why Quark still wins the interview:** production LOBs care about **allocator jitter, lock freedom, TLB, and p99 under multi-tenant load** — not a cold microbench where `std::map` fits in L1. Quark hard-guarantees **0 malloc / 0 mutex** after init and bounded capacity.
-
-![Measured latency/throughput bars](docs/comparison_measured.png)
 
 ---
 

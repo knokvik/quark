@@ -19,7 +19,7 @@ struct BookConfig {
     size_t level_capacity = kDefaultLevelCapacity;
     size_t index_capacity = kDefaultIndexCapacity;
     size_t event_capacity = kDefaultEventCapacity;
-    size_t price_map_capacity = 1 << 12; // overflow map outside flat window
+    size_t price_map_capacity = 1 << 15; // 32K price levels / side
     bool enable_events = true;
 };
 
@@ -91,8 +91,10 @@ private:
     void append_to_level(PriceLevel* lvl, Order* o) noexcept;
     void detach_from_level(Order* o) noexcept;
 
-    void link_level(Side side, PriceLevel* lvl) noexcept;
-    void unlink_level(Side side, PriceLevel* lvl) noexcept;
+    void register_level(Side side, PriceLevel* lvl) noexcept;
+    void unregister_level(Side side, PriceLevel* lvl) noexcept;
+    void recompute_best_bid() noexcept;
+    void recompute_best_ask() noexcept;
 
     void emit(EventType type, RejectReason reason, uint64_t order_id, uint64_t match_id,
               uint64_t price, uint32_t qty, Side side) noexcept;
@@ -102,14 +104,15 @@ private:
     RobinHoodIndex index_;
     SpscQueue<EngineEvent> events_;
 
-    // O(1) dense window
-    std::vector<PriceLevel*> bid_flat_;
-    std::vector<PriceLevel*> ask_flat_;
-    // Overflow for prices outside flat window
-    PriceMap bid_overflow_;
-    PriceMap ask_overflow_;
+    // Dense open-addressing price → level
+    PriceMap bid_map_;
+    PriceMap ask_map_;
 
-    // Sorted intrusive lists: head = best
+    // Active levels for rare best-recompute (only when best level empties)
+    std::vector<PriceLevel*> bid_active_;
+    std::vector<PriceLevel*> ask_active_;
+
+    // Best price heads (O(1) match path)
     PriceLevel* bid_head_{nullptr};
     PriceLevel* ask_head_{nullptr};
 

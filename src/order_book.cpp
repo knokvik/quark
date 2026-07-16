@@ -9,11 +9,12 @@ OrderBook::OrderBook(BookConfig cfg)
     , levels_(cfg.level_capacity)
     , index_(cfg.index_capacity)
     , events_(cfg.event_capacity)
-    , bid_flat_(kFlatSlots, nullptr)
-    , ask_flat_(kFlatSlots, nullptr)
-    , bid_overflow_(cfg.price_map_capacity)
-    , ask_overflow_(cfg.price_map_capacity)
-    , events_enabled_(cfg.enable_events) {}
+    , bid_map_(cfg.price_map_capacity)
+    , ask_map_(cfg.price_map_capacity)
+    , events_enabled_(cfg.enable_events) {
+    bid_active_.reserve(cfg.level_capacity);
+    ask_active_.reserve(cfg.level_capacity);
+}
 
 void OrderBook::emit(EventType type, RejectReason reason, uint64_t order_id, uint64_t match_id,
                      uint64_t price, uint32_t qty, Side side) noexcept {
@@ -39,32 +40,18 @@ size_t OrderBook::poll_events(EngineEvent* out, size_t max) noexcept {
 }
 
 PriceLevel* OrderBook::lookup_level(Side side, uint64_t price) const noexcept {
-    if (in_flat_window(price)) {
-        const auto& flat = (side == Side::Bid) ? bid_flat_ : ask_flat_;
-        return flat[flat_index(price)];
-    }
-    const PriceMap& ov = (side == Side::Bid) ? bid_overflow_ : ask_overflow_;
-    return ov.find(price);
+    const PriceMap& map = (side == Side::Bid) ? bid_map_ : ask_map_;
+    return map.find(price);
 }
 
 void OrderBook::store_level(Side side, uint64_t price, PriceLevel* lvl) noexcept {
-    if (in_flat_window(price)) {
-        auto& flat = (side == Side::Bid) ? bid_flat_ : ask_flat_;
-        flat[flat_index(price)] = lvl;
-        return;
-    }
-    auto& ov = (side == Side::Bid) ? bid_overflow_ : ask_overflow_;
-    ov.insert(price, lvl);
+    PriceMap& map = (side == Side::Bid) ? bid_map_ : ask_map_;
+    map.insert(price, lvl);
 }
 
 void OrderBook::erase_level_key(Side side, uint64_t price) noexcept {
-    if (in_flat_window(price)) {
-        auto& flat = (side == Side::Bid) ? bid_flat_ : ask_flat_;
-        flat[flat_index(price)] = nullptr;
-        return;
-    }
-    auto& ov = (side == Side::Bid) ? bid_overflow_ : ask_overflow_;
-    ov.erase(price);
+    PriceMap& map = (side == Side::Bid) ? bid_map_ : ask_map_;
+    map.erase(price);
 }
 
 uint32_t OrderBook::level_qty(Side side, uint64_t price) const noexcept {
@@ -121,47 +108,49 @@ void OrderBook::detach_from_level(Order* o) noexcept {
     }
 }
 
-void OrderBook::link_level(Side side, PriceLevel* lvl) noexcept {
+void OrderBook::register_level(Side side, PriceLevel* lvl) noexcept {
     lvl->left = lvl->right = nullptr;
     if (side == Side::Bid) {
-        if (!bid_head_ || lvl->price > bid_head_->price) {
-            lvl->right = bid_head_;
-            if (bid_head_) bid_head_->left = lvl;
-            bid_head_ = lvl;
-            return;
-        }
-        PriceLevel* cur = bid_head_;
-        while (cur->right && cur->right->price > lvl->price) cur = cur->right;
-        lvl->right = cur->right;
-        lvl->left = cur;
-        if (cur->right) cur->right->left = lvl;
-        cur->right = lvl;
+        bid_active_.push_back(lvl);
+        // stash index in height field for O(1) unregister
+        lvl->height = static_cast<uint32_t>(bid_active_.size() - 1);
+        if (!bid_head_ || lvl->price > bid_head_->price) bid_head_ = lvl;
     } else {
-        if (!ask_head_ || lvl->price < ask_head_->price) {
-            lvl->right = ask_head_;
-            if (ask_head_) ask_head_->left = lvl;
-            ask_head_ = lvl;
-            return;
-        }
-        PriceLevel* cur = ask_head_;
-        while (cur->right && cur->right->price < lvl->price) cur = cur->right;
-        lvl->right = cur->right;
-        lvl->left = cur;
-        if (cur->right) cur->right->left = lvl;
-        cur->right = lvl;
+        ask_active_.push_back(lvl);
+        lvl->height = static_cast<uint32_t>(ask_active_.size() - 1);
+        if (!ask_head_ || lvl->price < ask_head_->price) ask_head_ = lvl;
     }
 }
 
-void OrderBook::unlink_level(Side side, PriceLevel* lvl) noexcept {
-    if (lvl->left) {
-        lvl->left->right = lvl->right;
-    } else if (side == Side::Bid) {
-        bid_head_ = lvl->right;
-    } else {
-        ask_head_ = lvl->right;
+void OrderBook::unregister_level(Side side, PriceLevel* lvl) noexcept {
+    auto& active = (side == Side::Bid) ? bid_active_ : ask_active_;
+    const uint32_t idx = lvl->height;
+    if (idx < active.size() && active[idx] == lvl) {
+        PriceLevel* last = active.back();
+        active[idx] = last;
+        last->height = idx;
+        active.pop_back();
     }
-    if (lvl->right) lvl->right->left = lvl->left;
-    lvl->left = lvl->right = nullptr;
+    lvl->height = 0;
+    const bool was_best = (side == Side::Bid) ? (lvl == bid_head_) : (lvl == ask_head_);
+    if (was_best) {
+        if (side == Side::Bid) recompute_best_bid();
+        else recompute_best_ask();
+    }
+}
+
+void OrderBook::recompute_best_bid() noexcept {
+    bid_head_ = nullptr;
+    for (PriceLevel* p : bid_active_) {
+        if (!bid_head_ || p->price > bid_head_->price) bid_head_ = p;
+    }
+}
+
+void OrderBook::recompute_best_ask() noexcept {
+    ask_head_ = nullptr;
+    for (PriceLevel* p : ask_active_) {
+        if (!ask_head_ || p->price < ask_head_->price) ask_head_ = p;
+    }
 }
 
 PriceLevel* OrderBook::get_or_create_level(Side side, uint64_t price) noexcept {
@@ -172,14 +161,14 @@ PriceLevel* OrderBook::get_or_create_level(Side side, uint64_t price) noexcept {
         return nullptr;
     lvl->reset(price);
     store_level(side, price, lvl);
-    link_level(side, lvl);
+    register_level(side, lvl);
     return lvl;
 }
 
 void OrderBook::unlink_empty_level(Side side, PriceLevel* lvl) noexcept {
     if (!lvl || !lvl->empty()) return;
     erase_level_key(side, lvl->price);
-    unlink_level(side, lvl);
+    unregister_level(side, lvl);
     levels_.deallocate(lvl);
 }
 
@@ -412,10 +401,10 @@ void OrderBook::clear() noexcept {
     bid_head_ = nullptr;
     ask_head_ = nullptr;
     fill_count_ = 0;
-    std::fill(bid_flat_.begin(), bid_flat_.end(), nullptr);
-    std::fill(ask_flat_.begin(), ask_flat_.end(), nullptr);
-    bid_overflow_.clear();
-    ask_overflow_.clear();
+    bid_active_.clear();
+    ask_active_.clear();
+    bid_map_.clear();
+    ask_map_.clear();
     index_.clear();
     orders_.reset();
     levels_.reset();
