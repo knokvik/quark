@@ -1,88 +1,214 @@
-# Mercury-Style Matching Engine
+# Limit Order Book Matching Engine
 
-Sub-microsecond limit order book matching engine in modern C++20.
+### High-performance C++20 core for sub-microsecond order matching
 
-Built for HFT-style constraints: **zero allocations** and **zero locks** on the hot path, cache-line-aligned orders, Robin Hood ID lookup, intrusive FIFO price levels, and a lock-free SPSC event ring.
+[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-1F4E79?style=flat-square)](.github/workflows/ci.yml)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-0D7377?style=flat-square)](CMakeLists.txt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-C4A35A?style=flat-square)](LICENSE)
+[![Hot path](https://img.shields.io/badge/hot%20path-0%20alloc%20·%200%20locks-2F855A?style=flat-square)](docs/DESIGN.md)
 
-## Performance
+A production-shaped **limit order book (LOB) matching engine** implemented in modern C++. The design targets the constraints used in low-latency trading systems: pre-allocated memory, cache-line-aligned structures, lock-free output, and rigorous correctness testing against a reference implementation.
 
-Measured on Apple Silicon (Release, `-O3 -march=native`), mixed workload
-(60% limit / 20% cancel / 20% market, 500K ops, 50K warmup, events off):
+| | |
+|:--|:--|
+| **Documentation** | [Full index](docs/INDEX.md) · [Design spec](docs/DESIGN.md) · [Performance report](docs/PERFORMANCE.md) |
+| **Primary API** | `me::OrderBook` — `insert` / `cancel` / `poll_events` |
+| **Build** | CMake ≥ 3.16, C++20, Ninja recommended |
 
-| Metric | This engine | Target |
-|--------|-------------|--------|
-| **p50 latency** | ~125 ns | &lt; 500 ns |
-| **p99 latency** | ~1.7 μs | &lt; 2 μs |
-| **Throughput** | ~3.7 M ops/s | ≥ 1 M ops/s |
-| **Hot-path allocs** | 0 | 0 |
-| **Hot-path locks** | 0 | 0 |
+---
 
-Numbers vary by CPU, governor, and thermal state. Run `./build/me_bench` locally.
+## Performance at a glance
+
+Representative **Release** results on Apple Silicon (`-O3 -march=native`), mixed workload (60% limit / 20% cancel / 20% market), events disabled on the timed path:
+
+| Metric | Result | Design target |
+|--------|--------|----------------|
+| Latency **p50** | ~**125 ns** | &lt; 500 ns |
+| Latency **p99** | ~**1.7 μs** | &lt; 2 μs |
+| Throughput | ~**3.7 Mops/s**/core | ≥ 1 Mops/s |
+| Hot-path allocations | **0** | 0 |
+| Hot-path locks | **0** | 0 |
+
+<p align="center">
+  <img src="docs/assets/latency_vs_targets.png" alt="Latency versus design targets" width="720"/>
+</p>
+
+<p align="center">
+  <img src="docs/assets/throughput.png" alt="Sustained throughput" width="640"/>
+</p>
+
+<p align="center">
+  <img src="docs/assets/compliance_scorecard.png" alt="Design target compliance scorecard" width="560"/>
+</p>
+
+> **Note.** Absolute nanoseconds depend on CPU, OS noise, and thermal state. Re-run `./build/me_bench` on your hardware. Full methodology and interpretation: **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
+
+---
 
 ## Architecture
 
-- **Order pool** — pre-allocated arena + free list (`alignas(64)` orders)
-- **Price levels** — intrusive doubly-linked FIFO queues per price
-- **Best price** — intrusive sorted level lists (O(1) best bid/ask)
-- **Price lookup** — dense flat window (O(1)) + overflow Robin Hood map
-- **ID index** — Robin Hood open-addressing hash (no rehash on hot path)
-- **Output** — lock-free SPSC ring of `EngineEvent`s
+<p align="center">
+  <img src="docs/assets/architecture_overview.png" alt="System architecture overview" width="780"/>
+</p>
 
-See [docs/architecture.md](docs/architecture.md).
+| Subsystem | Design choice |
+|-----------|----------------|
+| **Order storage** | Pre-allocated arena + free list; each `Order` is `alignas(64)` |
+| **Price levels** | Intrusive doubly-linked **FIFO** queues (price–time priority) |
+| **Best bid / ask** | Intrusive sorted level lists — **O(1)** head access |
+| **Price → level** | Dense flat window **O(1)** + overflow hash map |
+| **Cancel path** | Robin Hood open-addressing map: `OrderID → Order*` |
+| **Output** | Lock-free **SPSC** ring of `EngineEvent` (ack / fill / cancel / reject) |
+
+<p align="center">
+  <img src="docs/assets/memory_layout.png" alt="Memory layout of pre-allocated arenas" width="720"/>
+</p>
+
+<p align="center">
+  <img src="docs/assets/order_lifecycle.png" alt="Order lifecycle state machine" width="680"/>
+</p>
+
+Formal specification: **[docs/DESIGN.md](docs/DESIGN.md)** · Component detail: **[docs/architecture.md](docs/architecture.md)**
+
+---
 
 ## Quick start
 
+### Prerequisites
+
+- CMake ≥ 3.16  
+- A C++20 compiler (Clang, Apple Clang, or GCC)  
+- Ninja (recommended)
+
+### Build, test, benchmark
+
 ```bash
+git clone <repository-url> matching-engine
+cd matching-engine
+
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./build/me_tests
-./build/me_bench
+
+./build/me_tests     # correctness suite
+./build/me_bench     # latency + throughput harness
 ```
 
-## Project layout
+Helper script:
 
+```bash
+./scripts/run_release.sh
 ```
+
+### Minimal usage
+
+```cpp
+#include "me/order_book.hpp"
+
+int main() {
+    me::OrderBook book;
+
+    book.insert(1, me::Side::Bid, me::OrderType::Limit, /*$100.00*/ 100'0000, 10);
+    book.insert(2, me::Side::Ask, me::OrderType::Limit, 100'0000, 10); // crosses → fill
+
+    me::EngineEvent events[64];
+    book.poll_events(events, 64);
+}
+```
+
+Prices are **fixed-point** integers: `ticks = dollars × 10 000` (four decimal places).
+
+---
+
+## Workload and latency profile
+
+<p align="center">
+  <img src="docs/assets/workload_mix.png" alt="Benchmark workload composition" width="480"/>
+</p>
+
+<p align="center">
+  <img src="docs/assets/latency_histogram.png" alt="Latency distribution histogram" width="720"/>
+</p>
+
+<p align="center">
+  <img src="docs/assets/latency_budget.png" alt="Hot-path latency budget" width="720"/>
+</p>
+
+<p align="center">
+  <img src="docs/assets/structural_cost.png" alt="Structural cost versus naive STL book" width="720"/>
+</p>
+
+---
+
+## Project structure
+
+```text
 matching-engine/
-├── include/me/          # headers (order, pool, robin_hood, order_book, ...)
-├── src/order_book.cpp   # matching core
-├── tests/unit_tests.cpp # correctness + vs naive reference
-├── bench/benchmark.cpp  # latency / throughput harness
-├── docs/                # design notes
-└── CMakeLists.txt
+├── include/me/           Public headers (order book, pools, index, events)
+├── src/order_book.cpp    Matching implementation
+├── tests/                Unit + differential tests vs naive reference book
+├── bench/                Latency / throughput harness
+├── docs/                 Design, performance, and figures (docs/assets/)
+├── examples/             Usage sketches
+├── scripts/              Release helper + chart generator
+├── CMakeLists.txt
+└── LICENSE
 ```
 
-## Testing
+---
 
-- FIFO within price level, price-time priority, partial fills
-- Cross prevention, cancel missing, pool exhaustion, market orders
-- Randomized stream checked against a naive `std::map` + `std::list` book
-- 10K+ assertions in the default unit run
+## Correctness
+
+| Category | Coverage |
+|----------|----------|
+| Priority | FIFO within level; price–time across levels |
+| Fills | Full and partial; multi-level sweeps |
+| Safety | Cancel missing ID; duplicate ID; pool exhaustion |
+| Differential | Randomized stream vs `std::map` + `std::list` reference |
 
 ```bash
 ./build/me_tests
 # Passed: N  Failed: 0
 ```
 
-## Design notes
+Checklist: [docs/correctness.md](docs/correctness.md)
 
-- [Intrusive lists vs `std::list`](docs/intrusive_lists.md)
-- [Robin Hood ID index](docs/robin_hood.md)
-- [Memory / arena strategy](docs/memory.md)
-- [Architecture overview](docs/architecture.md)
+---
 
-## Interview sound-bite
+## Documentation map
 
-> Single-threaded C++20 LOB: arena-allocated orders, intrusive FIFO levels,
-> Robin Hood ID map, O(1) best price via sorted level lists. p50 ~100–300 ns
-> on Apple Silicon with multi-million ops/s throughput and zero hot-path heap.
+| Document | Contents |
+|----------|----------|
+| **[docs/INDEX.md](docs/INDEX.md)** | Master documentation index |
+| **[docs/DESIGN.md](docs/DESIGN.md)** | Formal design specification |
+| **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** | Benchmark report with all figures |
+| **[docs/architecture.md](docs/architecture.md)** | Data-flow and component diagrams |
+| [docs/memory.md](docs/memory.md) | Arena / free-list strategy |
+| [docs/robin_hood.md](docs/robin_hood.md) | ID index design |
+| [docs/intrusive_lists.md](docs/intrusive_lists.md) | Why not `std::list` |
+| [docs/roadmap.md](docs/roadmap.md) | IOC/FOK, sharding, SPSC ingress, … |
+
+Regenerate publication charts:
+
+```bash
+python3 scripts/generate_charts.py
+```
+
+---
+
+## Design constraints (summary)
+
+1. **No `malloc` / `new` on the hot path** after construction.  
+2. **No mutexes or atomics inside the book** (SPSC boundary only for events).  
+3. **Fixed-point prices** — never `double` on the match path.  
+4. **Intrusive FIFO** for true price–time priority without allocator nodes.  
+5. **Reject under resource exhaustion** — never unbounded growth mid-stream.
+
+---
 
 ## License
 
-MIT
+This project is released under the [MIT License](LICENSE).
 
-## Build tips
+---
 
-Use Ninja + Release for representative numbers.
-
-### Correctness
-Differential tests vs naive book on randomized streams.
+*Built as a rigorous demonstration of low-latency systems engineering: memory hierarchy, cache-aware data structures, and disciplined performance measurement.*

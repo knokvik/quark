@@ -1,27 +1,41 @@
-# Memory Strategy
+# Memory Architecture
 
-## Goal
+## 1. Goal
 
-**Zero heap allocations on the hot path** after `OrderBook` construction.
+**Zero heap allocations on the hot path** after `OrderBook` construction. Resource exhaustion is reported as a reject, never as unbounded growth.
 
-## Arenas
+![Memory layout](assets/memory_layout.png)
 
-| Pool | Element | Default capacity | Notes |
-|------|---------|------------------|-------|
-| Orders | `alignas(64) Order` (64 B) | 1M | Bump + free-list |
-| Levels | `alignas(64) PriceLevel` (64 B) | 65K | Bump + free-list |
-| ID index | Robin Hood entries | 2M slots | Flat array |
-| Events | `EngineEvent` (64 B) | 64K | SPSC ring |
-| Price flat window | `PriceLevel*` | ~2M ticks | O(1) lookup ≤ $200 |
+## 2. Arenas
 
-## Free list
+| Pool | Element | Default capacity | Role |
+|------|---------|------------------|------|
+| Orders | `alignas(64) Order` (64 B) | 2²⁰ | Resting and in-flight orders |
+| Levels | `alignas(64) PriceLevel` (64 B) | 2¹⁶ | One node per active price per side |
+| ID index | Robin Hood entries | 2²¹ slots | Cancel / lookup |
+| Events | `EngineEvent` (64 B) | 2¹⁶ | SPSC output |
+| Price flat window | `PriceLevel*` | ~2M ticks × 2 | O(1) level pointer |
 
-Cancelled / fully-filled orders return to an intrusive free list (reuses the first pointer-sized word of the object). Next allocate prefers free-list over bump index.
+## 3. Allocation policy
 
-## Hugepages (Linux)
+```text
+allocate():
+  if free_list non-empty → pop free_list
+  else if bump_index < capacity → return &pool[bump_index++]
+  else → nullptr   // circuit breaker
+```
 
-Production deployments should back the order arena with `mmap(..., MAP_HUGETLB)` (2 MB pages) to cut TLB misses. macOS lacks transparent hugepage control; the portable path uses over-aligned `operator new[]` and page touch at init.
+Cancelled and fully filled orders return to an **intrusive free list** (reuses the first pointer-sized word of the object).
 
-## Circuit breaker
+## 4. Alignment and false sharing
 
-If the order pool is exhausted, `insert` returns `RejectReason::PoolExhausted` instead of growing — predictable failure over unbounded latency.
+Hot structs use `alignas(64)` so adjacent objects do not share a cache line. This matters when counters or multi-threaded adapters are introduced later; for the single-threaded MVP it still yields predictable object stride for the prefetcher.
+
+## 5. Production note (Linux)
+
+Backing the order arena with hugepages (`mmap` + `MAP_HUGETLB` or transparent huge pages) reduces TLB pressure for multi-tens-of-MB arenas. The portable default uses over-aligned `operator new[]` and zeroes pages at init.
+
+## 6. Related
+
+- [DESIGN.md](DESIGN.md) §6  
+- [intrusive_lists.md](intrusive_lists.md)  
