@@ -83,3 +83,6 @@ MIT
 ## Build tips
 
 Use Ninja + Release for representative numbers.
+
+### Correctness
+Differential tests vs naive book on randomized streams.
