@@ -9,3 +9,5 @@
 ## Status
 
 MVP complete: tests green, targets met on Apple Silicon.
+
+Last verified: 2026-07-11 — unit tests green, p50/p99 targets met on Apple Silicon.
